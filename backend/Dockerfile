@@ -18,6 +18,9 @@ RUN npm run build
 FROM node:20-alpine
 WORKDIR /app
 
+# Create uploads directory
+RUN mkdir -p uploads
+
 # Copy built application and dependencies from build stage
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
