@@ -6,6 +6,8 @@ import { componentTagger } from "lovable-tagger";
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
+  // For local development use: http://localhost:3000
+  // For ngrok use your backend ngrok URL (e.g., https://abc123.ngrok-free.app)
   const proxyTarget = env.VITE_API_PROXY_TARGET || "http://localhost:3000";
 
   return {

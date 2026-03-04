@@ -1,10 +1,21 @@
-import { useState } from "react";
+import { ChangeEvent, useMemo, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   LayoutDashboard, BookOpen, FileText, Brain, BarChart3,
-  User, LogOut, GraduationCap, Menu, X, ChevronRight
+  User, LogOut, GraduationCap, Menu, X, ChevronRight, Camera, Trash2
 } from "lucide-react";
+import {
+  buildProfileImageDataUrl,
+  getProfileIdentifierLabel,
+  getProfileIdentifierValue,
+  isAcceptedProfileImageFile,
+  PROFILE_IMAGE_ACCEPT,
+  readStoredAuth,
+  readStoredProfileImage,
+  removeStoredProfileImage,
+  writeStoredProfileImage,
+} from "@/lib/authSession";
 
 const sidebarItems = [
   { label: "My Insights", icon: LayoutDashboard, path: "/student" },
@@ -19,6 +30,59 @@ const StudentLayout = ({ children }: { children: React.ReactNode }) => {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [profileOpen, setProfileOpen] = useState(false);
+  const auth = useMemo(() => readStoredAuth(), []);
+  const profileName = auth?.fullName?.trim() || auth?.email.split("@")[0] || "Student";
+  const profileEmail = auth?.email || "-";
+  const profileIdentifierLabel = getProfileIdentifierLabel(auth);
+  const profileIdentifierValue = getProfileIdentifierValue(auth);
+  const [profileImage, setProfileImage] = useState<string>(() => readStoredProfileImage(auth));
+  const profileFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleUploadProfileImage = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    if (!isAcceptedProfileImageFile(file)) {
+      window.alert("Unsupported image type. Please choose a valid image format.");
+      event.target.value = "";
+      return;
+    }
+
+    const maxSizeBytes = 15 * 1024 * 1024;
+    if (file.size > maxSizeBytes) {
+      window.alert("Profile image must be 15 MB or smaller.");
+      event.target.value = "";
+      return;
+    }
+
+    buildProfileImageDataUrl(file)
+      .then((result) => {
+        setProfileImage(result);
+        const persisted = writeStoredProfileImage(auth, result);
+        if (!persisted) {
+          window.alert(
+            "Photo updated, but browser storage is full. Use a smaller image for permanent save."
+          );
+        }
+      })
+      .catch(() => {
+        window.alert("Could not process this image. Please try a different format.");
+      });
+    event.target.value = "";
+  };
+
+  const handleRemoveProfileImage = () => {
+    setProfileImage("");
+    removeStoredProfileImage(auth);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("eduhub_auth");
+    localStorage.removeItem("eduhub_student_id");
+    navigate("/auth");
+  };
 
   return (
     <div className="min-h-screen flex bg-background">
@@ -57,7 +121,7 @@ const StudentLayout = ({ children }: { children: React.ReactNode }) => {
         </nav>
 
         <div className="px-3 py-4 border-t border-sidebar-border">
-          <button onClick={() => navigate("/auth")} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-sm text-sidebar-foreground/50 hover:bg-destructive/10 hover:text-destructive transition-all duration-300">
+          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-sm text-sidebar-foreground/50 hover:bg-destructive/10 hover:text-destructive transition-all duration-300">
             <LogOut className="w-5 h-5 shrink-0" />
             {sidebarOpen && <span>Logout</span>}
           </button>
@@ -73,9 +137,13 @@ const StudentLayout = ({ children }: { children: React.ReactNode }) => {
           <div className="relative">
             <button onClick={() => setProfileOpen(!profileOpen)} className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-secondary transition-colors">
               <div className="w-9 h-9 rounded-xl gradient-primary flex items-center justify-center">
-                <User className="w-4 h-4 text-white" />
+                {profileImage ? (
+                  <img src={profileImage} alt={profileName} className="w-9 h-9 rounded-xl object-cover" />
+                ) : (
+                  <User className="w-4 h-4 text-white" />
+                )}
               </div>
-              <span className="text-sm font-medium text-foreground hidden md:inline">Student</span>
+              <span className="text-sm font-medium text-foreground hidden md:inline">{profileName}</span>
             </button>
 
             <AnimatePresence>
@@ -88,16 +156,44 @@ const StudentLayout = ({ children }: { children: React.ReactNode }) => {
                 >
                   <div className="text-center mb-4">
                     <div className="w-16 h-16 rounded-2xl gradient-primary flex items-center justify-center mx-auto mb-3">
-                      <User className="w-8 h-8 text-white" />
+                      {profileImage ? (
+                        <img src={profileImage} alt={profileName} className="w-16 h-16 rounded-2xl object-cover" />
+                      ) : (
+                        <User className="w-8 h-8 text-white" />
+                      )}
                     </div>
-                    <h3 className="font-heading font-bold text-foreground">John Doe</h3>
-                    <p className="text-sm text-muted-foreground">21BCE7001</p>
+                    <h3 className="font-heading font-bold text-foreground">{profileName}</h3>
+                    <p className="text-sm text-muted-foreground">{profileIdentifierLabel}: {profileIdentifierValue}</p>
+                  </div>
+                  <input
+                    ref={profileFileInputRef}
+                    type="file"
+                    accept={PROFILE_IMAGE_ACCEPT}
+                    className="hidden"
+                    onChange={handleUploadProfileImage}
+                  />
+                  <div className="flex items-center justify-center gap-2 mb-4">
+                    <button
+                      type="button"
+                      onClick={() => profileFileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs bg-secondary text-foreground hover:bg-secondary/70"
+                    >
+                      <Camera className="w-3.5 h-3.5" /> Update Photo
+                    </button>
+                    {profileImage ? (
+                      <button
+                        type="button"
+                        onClick={handleRemoveProfileImage}
+                        className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs bg-destructive/15 text-destructive hover:bg-destructive/25"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" /> Remove
+                      </button>
+                    ) : null}
                   </div>
                   <div className="text-sm space-y-2 text-muted-foreground">
-                    <p><strong className="text-foreground">Branch:</strong> CSE</p>
-                    <p><strong className="text-foreground">Year:</strong> IV</p>
-                    <p><strong className="text-foreground">Section:</strong> A</p>
-                    <p><strong className="text-foreground">Email:</strong> john@svce.edu.in</p>
+                    <p><strong className="text-foreground">Username:</strong> {profileName}</p>
+                    <p><strong className="text-foreground">Email:</strong> {profileEmail}</p>
+                    <p><strong className="text-foreground">{profileIdentifierLabel}:</strong> {profileIdentifierValue}</p>
                   </div>
                 </motion.div>
               )}

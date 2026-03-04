@@ -2,7 +2,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import PreLogin from "./pages/PreLogin";
 import Auth from "./pages/Auth";
 import StudentDashboard from "./pages/student/StudentDashboard";
@@ -19,9 +19,54 @@ import FacultyResults from "./pages/faculty/FacultyResults";
 import FacultyNotes from "./pages/faculty/FacultyNotes";
 import FacultyAttendance from "./pages/faculty/FacultyAttendance";
 import AdminDashboard from "./pages/admin/AdminDashboard";
+import AdminUsers from "./pages/admin/AdminUsers";
+import AdminSettings from "./pages/admin/AdminSettings";
 import NotFound from "./pages/NotFound";
+import { PortalRole, readStoredAuth } from "./lib/authSession";
+
+const roleHomeRoutes: Record<PortalRole, string> = {
+  student: "/student",
+  faculty: "/faculty",
+  admin: "/admin",
+};
 
 const queryClient = new QueryClient();
+
+const ProtectedRoute = ({
+  allowedRole,
+  children,
+}: {
+  allowedRole: PortalRole;
+  children: JSX.Element;
+}) => {
+  const auth = readStoredAuth();
+  if (!auth) {
+    return <Navigate to="/auth" replace />;
+  }
+
+  if (auth.role !== allowedRole) {
+    return <Navigate to={roleHomeRoutes[auth.role]} replace />;
+  }
+
+  return children;
+};
+
+const PublicOnlyRoute = ({ children }: { children: JSX.Element }) => {
+  const location = useLocation();
+  const isResetMode =
+    location.pathname === "/auth" &&
+    new URLSearchParams(location.search).get("mode") === "reset";
+  if (isResetMode) {
+    return children;
+  }
+
+  const auth = readStoredAuth();
+  if (!auth) {
+    return children;
+  }
+
+  return <Navigate to={roleHomeRoutes[auth.role]} replace />;
+};
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -30,28 +75,153 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<PreLogin />} />
-          <Route path="/auth" element={<Auth />} />
+          <Route
+            path="/"
+            element={
+              <PublicOnlyRoute>
+                <PreLogin />
+              </PublicOnlyRoute>
+            }
+          />
+          <Route
+            path="/auth"
+            element={
+              <PublicOnlyRoute>
+                <Auth />
+              </PublicOnlyRoute>
+            }
+          />
 
-          {/* Student Routes */}
-          <Route path="/student" element={<StudentDashboard />} />
-          <Route path="/student/notes" element={<StudentNotes />} />
-          <Route path="/student/assignments" element={<StudentAssignments />} />
-          <Route path="/student/quizzes" element={<StudentQuizzes />} />
-          <Route path="/student/quizzes/:quizId" element={<StudentQuizAttempt />} />
-          <Route path="/student/results" element={<StudentResults />} />
+          <Route
+            path="/student"
+            element={
+              <ProtectedRoute allowedRole="student">
+                <StudentDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/student/notes"
+            element={
+              <ProtectedRoute allowedRole="student">
+                <StudentNotes />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/student/assignments"
+            element={
+              <ProtectedRoute allowedRole="student">
+                <StudentAssignments />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/student/quizzes"
+            element={
+              <ProtectedRoute allowedRole="student">
+                <StudentQuizzes />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/student/quizzes/:quizId"
+            element={
+              <ProtectedRoute allowedRole="student">
+                <StudentQuizAttempt />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/student/results"
+            element={
+              <ProtectedRoute allowedRole="student">
+                <StudentResults />
+              </ProtectedRoute>
+            }
+          />
 
-          {/* Faculty Routes */}
-          <Route path="/faculty" element={<FacultyDashboard />} />
-          <Route path="/faculty/roster" element={<FacultyRoster />} />
-          <Route path="/faculty/quizzes" element={<FacultyQuizzes />} />
-          <Route path="/faculty/assignments" element={<FacultyAssignments />} />
-          <Route path="/faculty/results" element={<FacultyResults />} />
-          <Route path="/faculty/notes" element={<FacultyNotes />} />
-          <Route path="/faculty/attendance" element={<FacultyAttendance />} />
+          <Route
+            path="/faculty"
+            element={
+              <ProtectedRoute allowedRole="faculty">
+                <FacultyDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/faculty/roster"
+            element={
+              <ProtectedRoute allowedRole="faculty">
+                <FacultyRoster />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/faculty/quizzes"
+            element={
+              <ProtectedRoute allowedRole="faculty">
+                <FacultyQuizzes />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/faculty/assignments"
+            element={
+              <ProtectedRoute allowedRole="faculty">
+                <FacultyAssignments />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/faculty/results"
+            element={
+              <ProtectedRoute allowedRole="faculty">
+                <FacultyResults />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/faculty/notes"
+            element={
+              <ProtectedRoute allowedRole="faculty">
+                <FacultyNotes />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/faculty/attendance"
+            element={
+              <ProtectedRoute allowedRole="faculty">
+                <FacultyAttendance />
+              </ProtectedRoute>
+            }
+          />
 
-          {/* Admin Routes */}
-          <Route path="/admin" element={<AdminDashboard />} />
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute allowedRole="admin">
+                <AdminDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/users"
+            element={
+              <ProtectedRoute allowedRole="admin">
+                <AdminUsers />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/settings"
+            element={
+              <ProtectedRoute allowedRole="admin">
+                <AdminSettings />
+              </ProtectedRoute>
+            }
+          />
 
           <Route path="*" element={<NotFound />} />
         </Routes>
@@ -59,26 +229,5 @@ const App = () => (
     </TooltipProvider>
   </QueryClientProvider>
 );
-import { useEffect, useState } from "react";
 
-function ThemeToggle() {
-  const [dark, setDark] = useState(false);
-
-  useEffect(() => {
-    if (dark) {
-      document.documentElement.classList.add("dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-    }
-  }, [dark]);
-
-  return (
-    <button
-      onClick={() => setDark(!dark)}
-      className="px-3 py-1 rounded bg-gray-200 dark:bg-gray-700"
-    >
-      {dark ? "Light Mode" : "Dark Mode"}
-    </button>
-  );
-}
 export default App;
