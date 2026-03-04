@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  database:
+    build:
+      context: ./database
+      dockerfile: Dockerfile
+    container_name: eduhub-db-prod
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-eduhub}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - eduhub-network
+    restart: unless-stopped
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: eduhub-backend-prod
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB:-eduhub}
+      DB_SSL: "false"
+      PORT: 3000
+      NODE_ENV: production
+    depends_on:
+      - database
+    volumes:
+      - ./backend/uploads:/app/uploads
+    networks:
+      - eduhub-network
+    restart: unless-stopped
+
+  # Frontend with Nginx
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: eduhub-frontend-prod
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+    networks:
+      - eduhub-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  eduhub-network:
+    driver: bridge
