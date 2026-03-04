@@ -1,8 +1,17 @@
 import AdminLayout from "@/components/AdminLayout";
 import { motion } from "framer-motion";
-import { Users, GraduationCap, BookOpen, Activity, Shield, Settings, Zap } from "lucide-react";
+import {
+  Activity,
+  BookOpen,
+  GraduationCap,
+  RefreshCw,
+  Shield,
+  Users,
+  Zap,
+} from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { refreshWebsiteData } from "@/lib/appRefresh";
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
@@ -45,9 +54,13 @@ interface AdminDashboardData {
   recentMembers: DashboardMember[];
 }
 
+interface ApiErrorBody {
+  error?: string;
+}
+
 const fetchDashboardData = async (signal?: AbortSignal): Promise<AdminDashboardData> => {
   const response = await fetch(`${API_BASE}/api/auth/admin/dashboard`, { signal });
-  const body = (await response.json().catch(() => ({}))) as { error?: string };
+  const body = (await response.json().catch(() => ({}))) as ApiErrorBody & AdminDashboardData;
   if (!response.ok) {
     throw new Error(body.error || "Failed to load admin dashboard data.");
   }
@@ -63,26 +76,16 @@ const formatDateTime = (value: string): string => {
 };
 
 const AdminDashboard = () => {
-  const [facultyName, setFacultyName] = useState("");
-  const [facultyEmail, setFacultyEmail] = useState("");
-  const [facultyPassword, setFacultyPassword] = useState("");
-  const [studentName, setStudentName] = useState("");
-  const [studentRoll, setStudentRoll] = useState("");
-  const [studentEmail, setStudentEmail] = useState("");
-  const [studentPassword, setStudentPassword] = useState("");
-  const [facultyMessage, setFacultyMessage] = useState("");
-  const [studentMessage, setStudentMessage] = useState("");
-  const [facultyError, setFacultyError] = useState("");
-  const [studentError, setStudentError] = useState("");
-  const [isFacultySubmitting, setIsFacultySubmitting] = useState(false);
-  const [isStudentSubmitting, setIsStudentSubmitting] = useState(false);
+  const queryClient = useQueryClient();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState("");
 
   const {
     data: dashboardData,
-    isLoading: isDashboardLoading,
-    isError: isDashboardError,
-    error: dashboardError,
-    refetch: refetchDashboard,
+    isLoading,
+    isError,
+    error,
+    refetch,
   } = useQuery<AdminDashboardData, Error>({
     queryKey: ["admin-dashboard-data"],
     queryFn: ({ signal }) => fetchDashboardData(signal),
@@ -91,6 +94,21 @@ const AdminDashboard = () => {
     staleTime: 0,
     retry: 1,
   });
+
+  const handleRefreshWebsite = async () => {
+    if (isRefreshing) {
+      return;
+    }
+
+    setIsRefreshing(true);
+    try {
+      await refreshWebsiteData(queryClient);
+      await refetch();
+      setLastSyncedAt(new Date().toLocaleTimeString());
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const dashboard: AdminDashboardData = dashboardData ?? {
     metrics: {
@@ -119,77 +137,6 @@ const AdminDashboard = () => {
     },
     recentMembers: [],
   };
-
-  const createMember = async (payload: {
-    role: "faculty" | "student";
-    fullName: string;
-    email: string;
-    password: string;
-    rollNumber?: string;
-  }) => {
-    const response = await fetch(`${API_BASE}/api/auth/admin/create-member`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = (await response.json().catch(() => ({}))) as { error?: string };
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to create member.");
-    }
-  };
-
-  const handleCreateFaculty = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setFacultyError("");
-    setFacultyMessage("");
-    setIsFacultySubmitting(true);
-    try {
-      await createMember({
-        role: "faculty",
-        fullName: facultyName.trim(),
-        email: facultyEmail.trim(),
-        password: facultyPassword,
-      });
-      setFacultyMessage("Faculty account created successfully.");
-      setFacultyName("");
-      setFacultyEmail("");
-      setFacultyPassword("");
-      refetchDashboard();
-    } catch (error) {
-      setFacultyError(error instanceof Error ? error.message : "Failed to create faculty.");
-    } finally {
-      setIsFacultySubmitting(false);
-    }
-  };
-
-  const handleCreateStudent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setStudentError("");
-    setStudentMessage("");
-    setIsStudentSubmitting(true);
-    try {
-      await createMember({
-        role: "student",
-        fullName: studentName.trim(),
-        rollNumber: studentRoll.trim(),
-        email: studentEmail.trim(),
-        password: studentPassword,
-      });
-      setStudentMessage("Student account created successfully.");
-      setStudentName("");
-      setStudentRoll("");
-      setStudentEmail("");
-      setStudentPassword("");
-      refetchDashboard();
-    } catch (error) {
-      setStudentError(error instanceof Error ? error.message : "Failed to create student.");
-    } finally {
-      setIsStudentSubmitting(false);
-    }
-  };
-
-  const inputClass =
-    "w-full rounded-xl border border-border/70 bg-background/60 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30";
 
   const statCards = [
     {
@@ -221,37 +168,62 @@ const AdminDashboard = () => {
   return (
     <AdminLayout>
       <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl gradient-gold flex items-center justify-center">
-            <Zap className="w-5 h-5 text-white" />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl gradient-gold flex items-center justify-center">
+              <Zap className="w-5 h-5 text-white" />
+            </div>
+            <h1 className="text-2xl font-heading font-bold text-foreground">Admin Dashboard</h1>
           </div>
-          <h1 className="text-2xl font-heading font-bold text-foreground">Admin Dashboard</h1>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRefreshWebsite}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-2 rounded-xl border border-border/70 px-3 py-2 text-sm text-foreground hover:bg-secondary/50 disabled:opacity-70"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`} />
+              {isRefreshing ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
+        <p className="text-xs text-muted-foreground">
+          {lastSyncedAt
+            ? `Last synced at ${lastSyncedAt}.`
+            : "Refresh pulls latest updates across the website."}
+        </p>
 
-        {isDashboardError ? (
+        {isError ? (
           <div className="glass-card rounded-2xl p-4">
             <p className="text-sm text-destructive">
-              {dashboardError?.message ?? "Failed to load dashboard data."}
+              {error?.message ?? "Failed to load dashboard data."}
             </p>
           </div>
         ) : null}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {statCards.map((s, i) => (
-            <motion.div key={i} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.1 }}
-              className="glass-card rounded-2xl p-5 card-hover">
-              <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${s.gradient} flex items-center justify-center mb-3`}>
-                <s.icon className="w-5 h-5 text-white" />
+          {statCards.map((stat, index) => (
+            <motion.div
+              key={stat.label}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: index * 0.08 }}
+              className="glass-card rounded-2xl p-5 card-hover"
+            >
+              <div
+                className={`w-10 h-10 rounded-xl bg-gradient-to-br ${stat.gradient} flex items-center justify-center mb-3`}
+              >
+                <stat.icon className="w-5 h-5 text-white" />
               </div>
-              <p className="text-xs text-muted-foreground">{s.label}</p>
+              <p className="text-xs text-muted-foreground">{stat.label}</p>
               <p className="text-3xl font-heading font-bold text-foreground">
-                {isDashboardLoading ? "..." : s.value}
+                {isLoading ? "..." : stat.value}
               </p>
             </motion.div>
           ))}
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="glass-card rounded-2xl p-6">
             <h2 className="font-heading font-semibold text-foreground mb-4 flex items-center gap-2">
               <BookOpen className="w-5 h-5 text-gold" /> Faculty Overview
@@ -263,11 +235,15 @@ const AdminDashboard = () => {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Pending Quiz Reviews</span>
-                <span className="font-semibold text-foreground">{dashboard.facultyOverview.pendingQuizReviews}</span>
+                <span className="font-semibold text-foreground">
+                  {dashboard.facultyOverview.pendingQuizReviews}
+                </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Pending Assignment Reviews</span>
-                <span className="font-semibold text-foreground">{dashboard.facultyOverview.pendingAssignmentReviews}</span>
+                <span className="font-semibold text-foreground">
+                  {dashboard.facultyOverview.pendingAssignmentReviews}
+                </span>
               </div>
             </div>
           </div>
@@ -283,7 +259,9 @@ const AdminDashboard = () => {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">New Registrations (7 days)</span>
-                <span className="font-semibold text-foreground">{dashboard.studentOverview.recentRegistrations7d}</span>
+                <span className="font-semibold text-foreground">
+                  {dashboard.studentOverview.recentRegistrations7d}
+                </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Quiz Participants</span>
@@ -291,7 +269,39 @@ const AdminDashboard = () => {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Assignment Submitters</span>
-                <span className="font-semibold text-foreground">{dashboard.studentOverview.assignmentSubmitters}</span>
+                <span className="font-semibold text-foreground">
+                  {dashboard.studentOverview.assignmentSubmitters}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="glass-card rounded-2xl p-6">
+            <h2 className="font-heading font-semibold text-foreground mb-4 flex items-center gap-2">
+              <Activity className="w-5 h-5 text-accent" /> Platform Activity
+            </h2>
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Quizzes</span>
+                <span className="font-semibold text-foreground">{dashboard.metrics.quizzesCount}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Assignments</span>
+                <span className="font-semibold text-foreground">{dashboard.metrics.assignmentsCount}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Notes</span>
+                <span className="font-semibold text-foreground">{dashboard.metrics.notesCount}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Pending Quiz Review</span>
+                <span className="font-semibold text-foreground">{dashboard.metrics.pendingQuizReviews}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Pending Assignment Review</span>
+                <span className="font-semibold text-foreground">
+                  {dashboard.metrics.pendingAssignmentReviews}
+                </span>
               </div>
             </div>
           </div>
@@ -321,7 +331,7 @@ const AdminDashboard = () => {
 
           <div className="glass-card rounded-2xl p-6">
             <h2 className="font-heading font-semibold text-foreground mb-4 flex items-center gap-2">
-              <Settings className="w-5 h-5 text-primary" /> Recent Student Members
+              <GraduationCap className="w-5 h-5 text-primary" /> Recent Student Members
             </h2>
             <div className="space-y-3">
               {dashboard.studentOverview.recentlyAdded.length === 0 ? (
@@ -331,9 +341,7 @@ const AdminDashboard = () => {
                   <div key={member.id} className="rounded-xl bg-secondary/40 p-3">
                     <p className="text-sm font-medium text-foreground">{member.fullName || member.email}</p>
                     <p className="text-xs text-muted-foreground">{member.email}</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Roll: {member.rollNumber || "-"}
-                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">Roll No: {member.rollNumber || "-"}</p>
                     <p className="text-xs text-muted-foreground mt-1">
                       Added: {formatDateTime(member.createdAt)}
                     </p>
@@ -341,100 +349,6 @@ const AdminDashboard = () => {
                 ))
               )}
             </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="glass-card rounded-2xl p-6">
-            <h2 className="font-heading font-semibold text-foreground mb-4 flex items-center gap-2">
-              <Shield className="w-5 h-5 text-gold" /> Add Faculty
-            </h2>
-            <form onSubmit={handleCreateFaculty} className="space-y-3">
-              {facultyError ? <p className="text-sm text-destructive">{facultyError}</p> : null}
-              {facultyMessage ? <p className="text-sm text-accent">{facultyMessage}</p> : null}
-              <input
-                type="text"
-                placeholder="Faculty full name"
-                className={inputClass}
-                value={facultyName}
-                onChange={(e) => setFacultyName(e.target.value)}
-                required
-              />
-              <input
-                type="email"
-                placeholder="Faculty email"
-                className={inputClass}
-                value={facultyEmail}
-                onChange={(e) => setFacultyEmail(e.target.value)}
-                required
-              />
-              <input
-                type="password"
-                placeholder="Temporary password (min 6)"
-                className={inputClass}
-                value={facultyPassword}
-                onChange={(e) => setFacultyPassword(e.target.value)}
-                minLength={6}
-                required
-              />
-              <button
-                type="submit"
-                disabled={isFacultySubmitting}
-                className="w-full rounded-xl gradient-gold text-white py-2.5 text-sm font-medium disabled:opacity-70"
-              >
-                {isFacultySubmitting ? "Creating..." : "Create Faculty"}
-              </button>
-            </form>
-          </div>
-
-          <div className="glass-card rounded-2xl p-6">
-            <h2 className="font-heading font-semibold text-foreground mb-4 flex items-center gap-2">
-              <Settings className="w-5 h-5 text-gold" /> Add Student
-            </h2>
-            <form onSubmit={handleCreateStudent} className="space-y-3">
-              {studentError ? <p className="text-sm text-destructive">{studentError}</p> : null}
-              {studentMessage ? <p className="text-sm text-accent">{studentMessage}</p> : null}
-              <input
-                type="text"
-                placeholder="Student full name"
-                className={inputClass}
-                value={studentName}
-                onChange={(e) => setStudentName(e.target.value)}
-                required
-              />
-              <input
-                type="text"
-                placeholder="Roll number"
-                className={inputClass}
-                value={studentRoll}
-                onChange={(e) => setStudentRoll(e.target.value)}
-                required
-              />
-              <input
-                type="email"
-                placeholder="Student email"
-                className={inputClass}
-                value={studentEmail}
-                onChange={(e) => setStudentEmail(e.target.value)}
-                required
-              />
-              <input
-                type="password"
-                placeholder="Temporary password (min 6)"
-                className={inputClass}
-                value={studentPassword}
-                onChange={(e) => setStudentPassword(e.target.value)}
-                minLength={6}
-                required
-              />
-              <button
-                type="submit"
-                disabled={isStudentSubmitting}
-                className="w-full rounded-xl gradient-primary text-white py-2.5 text-sm font-medium disabled:opacity-70"
-              >
-                {isStudentSubmitting ? "Creating..." : "Create Student"}
-              </button>
-            </form>
           </div>
         </div>
       </div>

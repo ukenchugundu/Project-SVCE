@@ -96,9 +96,12 @@ const getStatusPill = (status: string, onStart: () => void) => {
       );
     case "completed":
       return (
-        <span className="px-4 py-2 rounded-xl gradient-accent text-white text-sm font-bold">
-          Completed
-        </span>
+        <button
+          onClick={onStart}
+          className="px-5 py-2.5 rounded-xl bg-accent text-white text-sm font-semibold hover:opacity-90"
+        >
+          View Attempt
+        </button>
       );
     default:
       return (

@@ -7,7 +7,11 @@ import quizRoutes from './routes/quizRoutes';
 const app: Express = express();
 const defaultPort = Number(process.env.PORT) || 3000;
 
-app.use(cors());
+// Configure CORS to allow requests from ngrok URLs
+app.use(cors({
+  origin: true, // This will allow all origins when running behind ngrok
+  credentials: true
+}));
 // Notes file upload is sent as base64 JSON; keep body limit above encoded 20 MB payload.
 app.use(express.json({ limit: '35mb' }));
 app.use('/uploads', express.static(path.resolve(__dirname, '..', 'uploads')));

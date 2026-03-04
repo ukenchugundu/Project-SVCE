@@ -22,8 +22,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+type QuestionType = "mcq" | "fill_blank" | "true_false";
+
 interface Question {
   question: string;
+  type: QuestionType;
   options: string[];
   correctAnswer: string;
 }
@@ -36,8 +39,10 @@ interface QuizOption {
 interface QuizQuestion {
   question?: string;
   question_text?: string;
+  question_type?: string;
   options?: Array<QuizOption | string>;
   correctAnswer?: string;
+  correct_answer_text?: string;
 }
 
 export interface EditableQuiz {
@@ -60,6 +65,64 @@ interface CreateQuizDialogProps {
   trigger?: ReactNode;
 }
 
+const MIN_QUIZ_DURATION_MINUTES = 1;
+const MAX_QUIZ_DURATION_MINUTES = 360;
+const DEFAULT_QUIZ_DURATION_MINUTES = 30;
+const durationQuickPresets = [15, 30, 45, 60];
+
+const clampDurationMinutes = (value: number): number =>
+  Math.max(MIN_QUIZ_DURATION_MINUTES, Math.min(MAX_QUIZ_DURATION_MINUTES, Math.round(value)));
+
+const parseDurationToMinutes = (duration: string): number => {
+  const normalized = duration.trim().toLowerCase();
+  if (!normalized) {
+    return DEFAULT_QUIZ_DURATION_MINUTES;
+  }
+
+  const clockMatch = normalized.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (clockMatch) {
+    const first = Number(clockMatch[1]);
+    const second = Number(clockMatch[2]);
+    const third = clockMatch[3] ? Number(clockMatch[3]) : 0;
+    if (clockMatch[3]) {
+      return clampDurationMinutes(first * 60 + Math.round((second * 60 + third) / 60));
+    }
+    return clampDurationMinutes(first + Math.round(second / 60));
+  }
+
+  const unitMatch = normalized.match(
+    /(\d+)\s*(hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)?/
+  );
+  if (!unitMatch) {
+    return DEFAULT_QUIZ_DURATION_MINUTES;
+  }
+
+  const rawValue = Number(unitMatch[1]);
+  if (!Number.isFinite(rawValue) || rawValue <= 0) {
+    return DEFAULT_QUIZ_DURATION_MINUTES;
+  }
+
+  const unit = unitMatch[2] ?? "min";
+  let minutes = rawValue;
+  if (unit.startsWith("h")) {
+    minutes = rawValue * 60;
+  } else if (unit.startsWith("s")) {
+    minutes = Math.ceil(rawValue / 60);
+  }
+
+  return clampDurationMinutes(minutes);
+};
+
+const formatDurationForPayload = (minutes: number): string => `${minutes} mins`;
+
+const formatTimerPreview = (minutes: number): string => {
+  const totalSeconds = clampDurationMinutes(minutes) * 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, mins, seconds].map((part) => String(part).padStart(2, "0")).join(":");
+};
+
 const getApiErrorMessage = async (
   response: Response,
   fallback: string
@@ -72,8 +135,36 @@ const getApiErrorMessage = async (
   }
 };
 
+const defaultTrueFalseOptions = ["True", "False"] as const;
+
+const normalizeQuestionType = (value: unknown): QuestionType => {
+  if (typeof value !== "string") {
+    return "mcq";
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "fill_blank" || normalized === "fillblank" || normalized === "fill") {
+    return "fill_blank";
+  }
+  if (
+    normalized === "true_false" ||
+    normalized === "truefalse" ||
+    normalized === "boolean" ||
+    normalized === "tf"
+  ) {
+    return "true_false";
+  }
+  return "mcq";
+};
+
+const normalizeTrueFalseAnswer = (value: string): string => {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "false" ? "False" : "True";
+};
+
 const emptyQuestion = (): Question => ({
   question: "",
+  type: "mcq",
   options: ["", "", "", ""],
   correctAnswer: "",
 });
@@ -90,6 +181,7 @@ const normalizeEditableQuestions = (questions: QuizQuestion[] | undefined): Ques
         : typeof rawQuestion.question === "string"
           ? rawQuestion.question
           : "";
+    const questionType = normalizeQuestionType(rawQuestion.question_type);
 
     const rawOptions = Array.isArray(rawQuestion.options)
       ? rawQuestion.options
@@ -103,12 +195,16 @@ const normalizeEditableQuestions = (questions: QuizQuestion[] | undefined): Ques
           .filter((optionText) => optionText.trim().length > 0)
       : [];
 
-    while (rawOptions.length < 4) {
-      rawOptions.push("");
+    if (questionType === "mcq") {
+      while (rawOptions.length < 4) {
+        rawOptions.push("");
+      }
     }
 
     const correctFromPayload =
       typeof rawQuestion.correctAnswer === "string" ? rawQuestion.correctAnswer : "";
+    const correctFromQuestionColumn =
+      typeof rawQuestion.correct_answer_text === "string" ? rawQuestion.correct_answer_text : "";
     const correctFromOption = Array.isArray(rawQuestion.options)
       ? rawQuestion.options.find(
           (option): option is QuizOption =>
@@ -118,17 +214,64 @@ const normalizeEditableQuestions = (questions: QuizQuestion[] | undefined): Ques
             typeof option.option_text === "string"
         )?.option_text ?? ""
       : "";
+
+    const preferredCorrect = (
+      correctFromPayload ||
+      correctFromQuestionColumn ||
+      correctFromOption
+    ).trim();
+
+    if (questionType === "fill_blank") {
+      return {
+        question: questionText,
+        type: questionType,
+        options: [],
+        correctAnswer: preferredCorrect,
+      };
+    }
+
+    if (questionType === "true_false") {
+      return {
+        question: questionText,
+        type: questionType,
+        options: [...defaultTrueFalseOptions],
+        correctAnswer: normalizeTrueFalseAnswer(preferredCorrect || "True"),
+      };
+    }
+
     const firstNonEmptyOption = rawOptions.find((optionText) => optionText.trim().length > 0) ?? "";
-    const preferredCorrect = (correctFromPayload || correctFromOption || firstNonEmptyOption).trim();
-    const correctAnswer = rawOptions.includes(preferredCorrect) ? preferredCorrect : "";
+    const safeCorrect = preferredCorrect || firstNonEmptyOption;
+    const correctAnswer = rawOptions.includes(safeCorrect) ? safeCorrect : "";
 
     return {
       question: questionText,
+      type: questionType,
       options: rawOptions,
       correctAnswer,
     };
   });
 };
+
+const sanitizeQuestionsForSubmit = (questions: Question[]): Question[] =>
+  questions.map((question) => {
+    if (question.type === "mcq") {
+      const filteredOptions = question.options
+        .map((option) => option.trim())
+        .filter((option) => option.length > 0);
+      return {
+        ...question,
+        question: question.question.trim(),
+        options: filteredOptions,
+        correctAnswer: question.correctAnswer.trim(),
+      };
+    }
+
+    return {
+      ...question,
+      question: question.question.trim(),
+      correctAnswer: question.correctAnswer.trim(),
+    };
+  });
 
 const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogProps) => {
   const [open, setOpen] = useState(false);
@@ -136,8 +279,9 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
   const [quizDetails, setQuizDetails] = useState({
     title: "",
     cls: "",
-    duration: "",
+    duration: formatDurationForPayload(DEFAULT_QUIZ_DURATION_MINUTES),
   });
+  const [durationMinutes, setDurationMinutes] = useState(DEFAULT_QUIZ_DURATION_MINUTES);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [requestedStatus, setRequestedStatus] = useState<QuizStatus | null>(null);
   const [isNewClass, setIsNewClass] = useState(false);
@@ -178,18 +322,25 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
     }
 
     if (mode === "edit" && quiz) {
+      const parsedDurationMinutes = parseDurationToMinutes(quiz.duration ?? "");
       setQuizDetails({
         title: quiz.title ?? "",
         cls: quiz.cls ?? "",
-        duration: quiz.duration ?? "",
+        duration: formatDurationForPayload(parsedDurationMinutes),
       });
+      setDurationMinutes(parsedDurationMinutes);
       setQuestions(normalizeEditableQuestions(quiz.questions));
       setStep(1);
       setIsNewClass(false);
       return;
     }
 
-    setQuizDetails({ title: "", cls: "", duration: "" });
+    setDurationMinutes(DEFAULT_QUIZ_DURATION_MINUTES);
+    setQuizDetails({
+      title: "",
+      cls: "",
+      duration: formatDurationForPayload(DEFAULT_QUIZ_DURATION_MINUTES),
+    });
     setQuestions([]);
     setStep(1);
     setIsNewClass(false);
@@ -276,7 +427,12 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
       queryClient.invalidateQueries({ queryKey: ["quizzes"] });
       setOpen(false);
       setStep(1);
-      setQuizDetails({ title: "", cls: "", duration: "" });
+      setDurationMinutes(DEFAULT_QUIZ_DURATION_MINUTES);
+      setQuizDetails({
+        title: "",
+        cls: "",
+        duration: formatDurationForPayload(DEFAULT_QUIZ_DURATION_MINUTES),
+      });
       setQuestions([]);
       if (mode === "edit") {
         if (variables.statusAfterSave === "Published") {
@@ -321,11 +477,33 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
     }
   };
 
+  const handleDurationMinutesChange = (value: string) => {
+    if (!value.trim()) {
+      return;
+    }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    const clamped = clampDurationMinutes(parsed);
+    setDurationMinutes(clamped);
+    setQuizDetails((prev) => ({
+      ...prev,
+      duration: formatDurationForPayload(clamped),
+    }));
+  };
+
+  const handleDurationPreset = (minutes: number) => {
+    const clamped = clampDurationMinutes(minutes);
+    setDurationMinutes(clamped);
+    setQuizDetails((prev) => ({
+      ...prev,
+      duration: formatDurationForPayload(clamped),
+    }));
+  };
+
   const handleAddQuestion = () => {
-    setQuestions([
-      ...questions,
-      emptyQuestion(),
-    ]);
+    setQuestions([...questions, emptyQuestion()]);
   };
 
   const handleQuestionChange = (index: number, value: string) => {
@@ -334,11 +512,41 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
     setQuestions(newQuestions);
   };
 
-  const handleOptionChange = (
-    qIndex: number,
-    optIndex: number,
-    value: string
-  ) => {
+  const handleQuestionTypeChange = (qIndex: number, type: QuestionType) => {
+    const newQuestions = [...questions];
+    const current = newQuestions[qIndex];
+    if (type === "mcq") {
+      newQuestions[qIndex] = {
+        ...current,
+        type,
+        options: ["", "", "", ""],
+        correctAnswer: "",
+      };
+      setQuestions(newQuestions);
+      return;
+    }
+
+    if (type === "true_false") {
+      newQuestions[qIndex] = {
+        ...current,
+        type,
+        options: [...defaultTrueFalseOptions],
+        correctAnswer: normalizeTrueFalseAnswer(current.correctAnswer || "True"),
+      };
+      setQuestions(newQuestions);
+      return;
+    }
+
+    newQuestions[qIndex] = {
+      ...current,
+      type: "fill_blank",
+      options: [],
+      correctAnswer: current.type === "fill_blank" ? current.correctAnswer : "",
+    };
+    setQuestions(newQuestions);
+  };
+
+  const handleOptionChange = (qIndex: number, optIndex: number, value: string) => {
     const newQuestions = [...questions];
     const previousOption = newQuestions[qIndex].options[optIndex];
     newQuestions[qIndex].options[optIndex] = value;
@@ -364,7 +572,7 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
     setRequestedStatus(statusAfterSave ?? null);
     mutation.mutate({
       ...quizDetails,
-      questions,
+      questions: sanitizeQuestionsForSubmit(questions),
       statusAfterSave,
     });
   };
@@ -372,13 +580,19 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
   const isStep2Valid = () => {
     return (
       questions.length > 0 &&
-          questions.every(
-            (q) =>
-              q.question &&
-              q.options.every((opt) => opt) &&
-              q.correctAnswer &&
-              q.options.includes(q.correctAnswer)
-          )
+      questions.every((q) => {
+        if (!q.question.trim()) {
+          return false;
+        }
+        if (q.type === "fill_blank") {
+          return Boolean(q.correctAnswer.trim());
+        }
+        const validOptions = q.options.map((opt) => opt.trim()).filter((opt) => Boolean(opt));
+        if (validOptions.length < 2) {
+          return false;
+        }
+        return Boolean(q.correctAnswer.trim()) && validOptions.includes(q.correctAnswer.trim());
+      })
     );
   };
 
@@ -492,18 +706,40 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
                 />
               </div>
               <div>
-                <Label htmlFor="duration">Duration (e.g., 30 mins)</Label>
-                <Input
-                  id="duration"
-                  value={quizDetails.duration}
-                  onChange={(e) =>
-                    setQuizDetails({
-                      ...quizDetails,
-                      duration: e.target.value,
-                    })
-                  }
-                  required
-                />
+                <Label htmlFor="durationMinutes">Quiz Timer (minutes)</Label>
+                <div className="mt-2 grid gap-3">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto]">
+                    <Input
+                      id="durationMinutes"
+                      type="number"
+                      min={MIN_QUIZ_DURATION_MINUTES}
+                      max={MAX_QUIZ_DURATION_MINUTES}
+                      step={1}
+                      value={durationMinutes}
+                      onChange={(e) => handleDurationMinutesChange(e.target.value)}
+                      required
+                    />
+                    <div className="rounded-md border px-3 py-2 text-sm font-mono text-center sm:min-w-[108px]">
+                      {formatTimerPreview(durationMinutes)}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {durationQuickPresets.map((presetMinutes) => (
+                      <Button
+                        key={presetMinutes}
+                        type="button"
+                        variant={durationMinutes === presetMinutes ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => handleDurationPreset(presetMinutes)}
+                      >
+                        {presetMinutes} min
+                      </Button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Students will get {formatTimerPreview(durationMinutes)} to complete this quiz.
+                  </p>
+                </div>
               </div>
               <Button onClick={handleNextStep}>Next</Button>
             </motion.div>
@@ -530,6 +766,24 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
                         <Trash2 className="w-4 h-4 text-destructive" />
                       </Button>
                     </div>
+                    <div>
+                      <Label className="text-xs text-muted-foreground">Question Type</Label>
+                      <Select
+                        value={q.type}
+                        onValueChange={(value) =>
+                          handleQuestionTypeChange(qIndex, value as QuestionType)
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="mcq">Multiple Choice</SelectItem>
+                          <SelectItem value="fill_blank">Fill in the Blank</SelectItem>
+                          <SelectItem value="true_false">True / False</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                     <Input
                       placeholder="Question text"
                       value={q.question}
@@ -537,25 +791,41 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
                         handleQuestionChange(qIndex, e.target.value)
                       }
                     />
-                    <RadioGroup
-                      value={q.correctAnswer}
-                      onValueChange={(value) =>
-                        handleCorrectAnswerChange(qIndex, value)
-                      }
-                    >
-                      {q.options.map((opt, optIndex) => (
-                        <div key={optIndex} className="flex items-center gap-2">
-                          <RadioGroupItem value={opt} id={`q${qIndex}o${optIndex}`} />
-                          <Input
-                            placeholder={`Option ${optIndex + 1}`}
-                            value={opt}
-                            onChange={(e) =>
-                              handleOptionChange(qIndex, optIndex, e.target.value)
-                            }
-                          />
-                        </div>
-                      ))}
-                    </RadioGroup>
+
+                    {q.type === "fill_blank" ? (
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground">Expected Answer</Label>
+                        <Input
+                          placeholder="Type the expected answer"
+                          value={q.correctAnswer}
+                          onChange={(e) =>
+                            handleCorrectAnswerChange(qIndex, e.target.value)
+                          }
+                        />
+                      </div>
+                    ) : (
+                      <RadioGroup
+                        value={q.correctAnswer}
+                        onValueChange={(value) => handleCorrectAnswerChange(qIndex, value)}
+                      >
+                        {q.options.map((opt, optIndex) => (
+                          <div key={optIndex} className="flex items-center gap-2">
+                            <RadioGroupItem value={opt} id={`q${qIndex}o${optIndex}`} />
+                            {q.type === "mcq" ? (
+                              <Input
+                                placeholder={`Option ${optIndex + 1}`}
+                                value={opt}
+                                onChange={(e) =>
+                                  handleOptionChange(qIndex, optIndex, e.target.value)
+                                }
+                              />
+                            ) : (
+                              <Input value={opt} disabled readOnly />
+                            )}
+                          </div>
+                        ))}
+                      </RadioGroup>
+                    )}
                   </div>
                 ))}
               </div>
@@ -563,6 +833,12 @@ const CreateQuizDialog = ({ mode = "create", quiz, trigger }: CreateQuizDialogPr
               <Button onClick={handleAddQuestion}>
                 <Plus className="w-4 h-4 mr-2" /> Add Question
               </Button>
+              <p className="text-xs text-muted-foreground">
+                Quiz questions are auto-shuffled per student when they start the attempt.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                For MCQ, fill at least 2 options and select one correct answer.
+              </p>
 
               <div className="flex flex-wrap justify-between gap-2">
                 <Button variant="outline" onClick={() => setStep(1)}>

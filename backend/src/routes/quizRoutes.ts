@@ -34,9 +34,16 @@ import {
 } from '../controllers/notesController';
 import {
   createMemberByAdmin,
+  deleteAdminMember,
   getAdminDashboardData,
+  getAdminMembers,
   loginUser,
+  requestPasswordReset,
   registerUser,
+  resendLoginOtp,
+  resetPassword,
+  updateAdminMember,
+  verifyLoginOtp,
 } from '../controllers/authController';
 
 const router = Router();
@@ -70,7 +77,14 @@ router.put('/notes/:noteId', updateNote);
 router.delete('/notes/:noteId', deleteNote);
 router.post('/auth/register', registerUser);
 router.post('/auth/login', loginUser);
+router.post('/auth/login/verify-otp', verifyLoginOtp);
+router.post('/auth/login/resend-otp', resendLoginOtp);
+router.post('/auth/forgot-password', requestPasswordReset);
+router.post('/auth/reset-password', resetPassword);
 router.post('/auth/admin/create-member', createMemberByAdmin);
 router.get('/auth/admin/dashboard', getAdminDashboardData);
+router.get('/auth/admin/members', getAdminMembers);
+router.put('/auth/admin/members/:memberId', updateAdminMember);
+router.delete('/auth/admin/members/:memberId', deleteAdminMember);
 
 export default router;

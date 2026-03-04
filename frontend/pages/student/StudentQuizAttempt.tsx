@@ -4,7 +4,10 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Brain, ChevronLeft, ChevronRight, Clock, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
+
+type QuestionType = "mcq" | "fill_blank" | "true_false";
 
 interface AttemptOption {
   option_id: number;
@@ -14,6 +17,7 @@ interface AttemptOption {
 interface AttemptQuestion {
   question_id: number;
   question_text: string;
+  question_type: QuestionType;
   options: AttemptOption[];
 }
 
@@ -35,6 +39,8 @@ interface AttemptSession {
   submitted_at: string | null;
   status: "InProgress" | "Submitted";
   score: number | null;
+  faculty_score: number | null;
+  reviewed_at: string | null;
   total_questions: number;
   remaining_seconds: number;
   answers: Record<string, string>;
@@ -150,7 +156,7 @@ const saveAttemptAnswer = async (
   quizId: string,
   attemptId: number,
   studentId: string,
-  answer: { questionId: number; selectedOptionText: string }
+  answer: { questionId: number; answerText: string }
 ): Promise<SaveAnswersResponse> => {
   const request = withTimeoutSignal(6000);
   try {
@@ -239,6 +245,32 @@ const normalizeAnswers = (rawAnswers: Record<string, string>): Record<number, st
   return normalized;
 };
 
+const normalizeQuestionType = (value: string): QuestionType => {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "fill_blank" || normalized === "fillblank" || normalized === "fill") {
+    return "fill_blank";
+  }
+  if (
+    normalized === "true_false" ||
+    normalized === "truefalse" ||
+    normalized === "boolean" ||
+    normalized === "tf"
+  ) {
+    return "true_false";
+  }
+  return "mcq";
+};
+
+const formatQuestionTypeLabel = (value: QuestionType): string => {
+  if (value === "fill_blank") {
+    return "Fill in the Blank";
+  }
+  if (value === "true_false") {
+    return "True / False";
+  }
+  return "Multiple Choice";
+};
+
 const StudentQuizAttempt = () => {
   const navigate = useNavigate();
   const { quizId = "" } = useParams<{ quizId: string }>();
@@ -252,7 +284,18 @@ const StudentQuizAttempt = () => {
   const autoSubmitTriggeredRef = useRef(false);
 
   const applyAttemptSession = (session: AttemptSession) => {
-    setAttemptSession(session);
+    const normalizedSession: AttemptSession = {
+      ...session,
+      quiz: {
+        ...session.quiz,
+        questions: (session.quiz?.questions ?? []).map((question) => ({
+          ...question,
+          question_type: normalizeQuestionType(String(question.question_type ?? "mcq")),
+          options: Array.isArray(question.options) ? question.options : [],
+        })),
+      },
+    };
+    setAttemptSession(normalizedSession);
     setAnswers(normalizeAnswers(session.answers));
     setRemainingSeconds(session.remaining_seconds ?? 0);
     if (session.status === "InProgress") {
@@ -282,7 +325,7 @@ const StudentQuizAttempt = () => {
   }, [startedAttempt]);
 
   const saveMutation = useMutation({
-    mutationFn: (payload: { questionId: number; selectedOptionText: string }) => {
+    mutationFn: (payload: { questionId: number; answerText: string }) => {
       if (!attemptSession) {
         throw new Error("Attempt not initialized.");
       }
@@ -334,8 +377,12 @@ const StudentQuizAttempt = () => {
   const quiz = attemptSession?.quiz;
   const totalQuestions = quiz?.questions.length ?? 0;
   const question = quiz?.questions[currentIndex];
+  const publishedScore = attemptSession?.faculty_score;
 
-  const answeredCount = useMemo(() => Object.keys(answers).length, [answers]);
+  const answeredCount = useMemo(
+    () => Object.values(answers).filter((value) => value.trim().length > 0).length,
+    [answers]
+  );
 
   useEffect(() => {
     if (!isInProgress) {
@@ -393,19 +440,30 @@ const StudentQuizAttempt = () => {
     return () => document.removeEventListener("visibilitychange", visibilityHandler);
   }, [isInProgress]);
 
-  const handleOptionSelect = (questionId: number, optionText: string) => {
+  const handleAnswerSave = (questionId: number, answerText: string) => {
     if (!isInProgress || !attemptSession) {
       return;
     }
 
-    if (answers[questionId] === optionText) {
+    if (!answerText.trim()) {
       return;
     }
 
-    setAnswers((previous) => ({ ...previous, [questionId]: optionText }));
+    setAnswers((previous) => ({ ...previous, [questionId]: answerText }));
     saveMutation.mutate({
       questionId,
-      selectedOptionText: optionText,
+      answerText,
+    });
+  };
+
+  const handleTextAnswerChange = (questionId: number, value: string) => {
+    setAnswers((previous) => {
+      if (!value.trim()) {
+        const updated = { ...previous };
+        delete updated[questionId];
+        return updated;
+      }
+      return { ...previous, [questionId]: value };
     });
   };
 
@@ -452,32 +510,46 @@ const StudentQuizAttempt = () => {
 
         {!isLoading && !isError && attemptSession && (
           <>
-            <div className="glass-card rounded-2xl p-4 flex flex-wrap items-center gap-4 text-sm">
-              <span
-                className={`flex items-center gap-1 font-semibold ${
-                  remainingSeconds <= 60 && isInProgress ? "text-destructive" : "text-foreground"
-                }`}
-              >
-                <Clock className="w-4 h-4" /> Time Left: {formatRemainingTime(remainingSeconds)}
-              </span>
-              <span>
-                Question {Math.min(currentIndex + 1, totalQuestions)} of {totalQuestions}
-              </span>
-              <span>
-                Answered: {answeredCount}/{totalQuestions}
-              </span>
-              <span className="flex items-center gap-1">
-                <AlertTriangle className="w-4 h-4" /> Tab switches: {tabSwitchCount}
-              </span>
-              <span className="flex items-center gap-1">
-                <Save className="w-4 h-4" />
-                {saveMutation.isPending
-                  ? "Saving..."
-                  : lastSavedAt
-                    ? `Saved at ${lastSavedAt}`
-                    : "Waiting for first save"}
-              </span>
-            </div>
+            {isInProgress ? (
+              <div className="glass-card rounded-2xl p-4 flex flex-wrap items-center gap-4 text-sm">
+                <span
+                  className={`flex items-center gap-1 font-semibold ${
+                    remainingSeconds <= 60 ? "text-destructive" : "text-foreground"
+                  }`}
+                >
+                  <Clock className="w-4 h-4" /> Time Left: {formatRemainingTime(remainingSeconds)}
+                </span>
+                <span>
+                  Question {Math.min(currentIndex + 1, totalQuestions)} of {totalQuestions}
+                </span>
+                <span>
+                  Answered: {answeredCount}/{totalQuestions}
+                </span>
+                <span className="flex items-center gap-1">
+                  <AlertTriangle className="w-4 h-4" /> Tab switches: {tabSwitchCount}
+                </span>
+                <span className="flex items-center gap-1">
+                  <Save className="w-4 h-4" />
+                  {saveMutation.isPending
+                    ? "Saving..."
+                    : lastSavedAt
+                      ? `Saved at ${lastSavedAt}`
+                      : "Waiting for first save"}
+                </span>
+              </div>
+            ) : (
+              <div className="glass-card rounded-2xl p-4 bg-primary/5 border-primary/20 text-sm">
+                <p className="font-medium text-foreground">Quiz submitted successfully.</p>
+                <p className="text-muted-foreground mt-1">
+                  Attempt review is available below.
+                </p>
+                <p className="mt-2 text-foreground font-semibold">
+                  {publishedScore !== null && publishedScore !== undefined
+                    ? `Published Score: ${publishedScore} / ${attemptSession.total_questions}`
+                    : "Score will appear after faculty publishes the result."}
+                </p>
+              </div>
+            )}
 
             {totalQuestions === 0 && (
               <p className="text-sm text-muted-foreground">This quiz has no questions yet.</p>
@@ -488,27 +560,62 @@ const StudentQuizAttempt = () => {
                 <h2 className="font-medium text-foreground">
                   {currentIndex + 1}. {question.question_text}
                 </h2>
+                <p className="text-xs text-muted-foreground">
+                  {formatQuestionTypeLabel(question.question_type)}
+                </p>
 
-                <div className="space-y-3">
-                  {question.options.map((option) => {
-                    const selected = answers[question.question_id] === option.option_text;
-                    return (
-                      <button
-                        key={option.option_id}
-                        type="button"
-                        onClick={() => handleOptionSelect(question.question_id, option.option_text)}
-                        className={`w-full text-left px-4 py-3 rounded-xl border transition-all ${
-                          selected
-                            ? "border-primary bg-primary/10"
-                            : "border-border hover:border-primary/50"
-                        }`}
-                        disabled={!isInProgress}
+                {question.question_type === "fill_blank" ? (
+                  <div className="space-y-3">
+                    <Input
+                      placeholder="Type your answer"
+                      value={answers[question.question_id] ?? ""}
+                      onChange={(event) =>
+                        handleTextAnswerChange(question.question_id, event.target.value)
+                      }
+                      onBlur={() => {
+                        const textAnswer = (answers[question.question_id] ?? "").trim();
+                        if (textAnswer) {
+                          handleAnswerSave(question.question_id, textAnswer);
+                        }
+                      }}
+                    />
+                    <div className="flex justify-end">
+                      <Button
+                        variant="outline"
+                        onClick={() =>
+                          handleAnswerSave(
+                            question.question_id,
+                            (answers[question.question_id] ?? "").trim()
+                          )
+                        }
+                        disabled={!answers[question.question_id]?.trim() || saveMutation.isPending}
                       >
-                        {option.option_text}
-                      </button>
-                    );
-                  })}
-                </div>
+                        Save Answer
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {question.options.map((option) => {
+                      const selected = answers[question.question_id] === option.option_text;
+                      return (
+                        <button
+                          key={option.option_id}
+                          type="button"
+                          onClick={() => handleAnswerSave(question.question_id, option.option_text)}
+                          className={`w-full text-left px-4 py-3 rounded-xl border transition-all ${
+                            selected
+                              ? "border-primary bg-primary/10"
+                              : "border-border hover:border-primary/50"
+                          }`}
+                          disabled={!isInProgress}
+                        >
+                          {option.option_text}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
 
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
                   <div className="flex items-center gap-2">
@@ -537,14 +644,26 @@ const StudentQuizAttempt = () => {
             )}
 
             {!isInProgress && (
-              <div className="glass-card rounded-2xl p-5 bg-primary/5 border-primary/20">
-                <p className="text-sm text-foreground font-medium">
-                  Quiz submitted successfully.
-                </p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Answers and score are hidden for students. Faculty will publish your final score
-                  in the Results section.
-                </p>
+              <div className="glass-card rounded-2xl p-5 space-y-4">
+                <p className="text-sm font-medium text-foreground">Attempted Questions</p>
+                <div className="space-y-3">
+                  {quiz?.questions.map((quizQuestion, index) => (
+                    <div key={quizQuestion.question_id} className="rounded-xl border p-4 space-y-2">
+                      <p className="text-sm text-foreground font-medium">
+                        {index + 1}. {quizQuestion.question_text}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatQuestionTypeLabel(quizQuestion.question_type)}
+                      </p>
+                      <p className="text-sm">
+                        <span className="text-muted-foreground">Your answer: </span>
+                        <span className="font-medium text-foreground">
+                          {answers[quizQuestion.question_id]?.trim() || "Not answered"}
+                        </span>
+                      </p>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </>

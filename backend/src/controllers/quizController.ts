@@ -3,15 +3,18 @@ import { Pool, PoolClient } from "pg";
 import pool from "../utils/db";
 
 type QuizStatus = "Draft" | "Published" | "Completed";
+type QuestionType = "mcq" | "fill_blank" | "true_false";
 
 interface QuizQuestionInput {
   question: string;
-  options: string[];
+  type?: QuestionType;
+  options?: string[];
   correctAnswer: string;
 }
 
 interface NormalizedQuizQuestion {
   question: string;
+  type: QuestionType;
   options: string[];
   correctAnswer: string;
 }
@@ -32,6 +35,8 @@ interface InMemoryOption {
 interface InMemoryQuestion {
   question_id: number;
   question_text: string;
+  question_type: QuestionType;
+  correct_answer_text: string;
   options: InMemoryOption[];
 }
 
@@ -56,26 +61,72 @@ const sampleQuizPayload: NormalizedQuizPayload = {
   questions: [
     {
       question: "What is the time complexity of binary search in a sorted array?",
+      type: "mcq",
       options: ["O(1)", "O(log n)", "O(n)", "O(n log n)"],
       correctAnswer: "O(log n)",
     },
     {
       question: "Which SQL command is used to retrieve data from a table?",
+      type: "mcq",
       options: ["GET", "SELECT", "FETCH", "PULL"],
       correctAnswer: "SELECT",
     },
     {
-      question: "Which HTTP method is commonly used to create a resource?",
-      options: ["GET", "POST", "PUT", "DELETE"],
-      correctAnswer: "POST",
+      question: "HTTP status 200 means _____",
+      type: "fill_blank",
+      options: [],
+      correctAnswer: "OK",
     },
     {
-      question: "In React, which hook is used to manage local component state?",
-      options: ["useEffect", "useRef", "useState", "useMemo"],
-      correctAnswer: "useState",
+      question: "React is primarily used for front-end development.",
+      type: "true_false",
+      options: ["True", "False"],
+      correctAnswer: "True",
     },
   ],
 };
+
+const defaultTrueFalseOptions = ["True", "False"];
+
+const normalizeQuestionType = (value: unknown): QuestionType | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "mcq") {
+    return "mcq";
+  }
+
+  if (normalized === "fill_blank" || normalized === "fillblank" || normalized === "fill") {
+    return "fill_blank";
+  }
+
+  if (
+    normalized === "true_false" ||
+    normalized === "truefalse" ||
+    normalized === "boolean" ||
+    normalized === "tf"
+  ) {
+    return "true_false";
+  }
+
+  return null;
+};
+
+const normalizeTrueFalseAnswer = (value: string): string | null => {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") {
+    return "True";
+  }
+  if (normalized === "false") {
+    return "False";
+  }
+  return null;
+};
+
+const normalizeFreeTextForComparison = (value: string): string =>
+  value.trim().replace(/\s+/g, " ").toLowerCase();
 
 const dbConnectionErrorCodes = new Set([
   "28P01",
@@ -165,7 +216,9 @@ const ensureQuizQuestionTables = async (
     CREATE TABLE IF NOT EXISTS questions (
       question_id SERIAL PRIMARY KEY,
       quiz_id INT REFERENCES quizzes(${quizIdColumn}) ON DELETE CASCADE,
-      question_text TEXT NOT NULL
+      question_text TEXT NOT NULL,
+      question_type VARCHAR(30) NOT NULL DEFAULT 'mcq',
+      correct_answer_text TEXT NOT NULL DEFAULT ''
     )
   `);
 
@@ -177,6 +230,24 @@ const ensureQuizQuestionTables = async (
       is_correct BOOLEAN NOT NULL DEFAULT FALSE
     )
   `);
+
+  await db.query("ALTER TABLE questions ADD COLUMN IF NOT EXISTS question_type VARCHAR(30)");
+  await db.query(
+    "ALTER TABLE questions ALTER COLUMN question_type SET DEFAULT 'mcq'"
+  );
+  await db.query(
+    "UPDATE questions SET question_type = 'mcq' WHERE question_type IS NULL OR question_type = ''"
+  );
+  await db.query("ALTER TABLE questions ALTER COLUMN question_type SET NOT NULL");
+
+  await db.query("ALTER TABLE questions ADD COLUMN IF NOT EXISTS correct_answer_text TEXT");
+  await db.query(
+    "UPDATE questions SET correct_answer_text = '' WHERE correct_answer_text IS NULL"
+  );
+  await db.query(
+    "ALTER TABLE questions ALTER COLUMN correct_answer_text SET DEFAULT ''"
+  );
+  await db.query("ALTER TABLE questions ALTER COLUMN correct_answer_text SET NOT NULL");
 };
 
 const parseQuizIdParam = (req: Request, res: Response): number | null => {
@@ -196,14 +267,27 @@ const isValidQuestion = (question: unknown): question is QuizQuestionInput => {
   const payload = question as Partial<QuizQuestionInput>;
   const hasQuestionText =
     typeof payload.question === "string" && payload.question.trim().length > 0;
-  const hasOptions =
-    Array.isArray(payload.options) &&
-    payload.options.length > 0 &&
-    payload.options.every((option) => typeof option === "string" && option.trim().length > 0);
   const hasCorrectAnswer =
     typeof payload.correctAnswer === "string" && payload.correctAnswer.trim().length > 0;
 
-  return hasQuestionText && hasOptions && hasCorrectAnswer;
+  if (!hasQuestionText || !hasCorrectAnswer) {
+    return false;
+  }
+
+  const questionType = normalizeQuestionType(payload.type ?? "mcq") ?? "mcq";
+  if (questionType === "fill_blank") {
+    return true;
+  }
+
+  if (questionType === "true_false") {
+    return normalizeTrueFalseAnswer(payload.correctAnswer ?? "") !== null;
+  }
+
+  const hasOptions =
+    Array.isArray(payload.options) &&
+    payload.options.length > 1 &&
+    payload.options.every((option) => typeof option === "string" && option.trim().length > 0);
+  return hasOptions;
 };
 
 const normalizeQuizPayload = (body: unknown): {
@@ -238,21 +322,50 @@ const normalizeQuizPayload = (body: unknown): {
 
   if (!rawQuestions.every(isValidQuestion)) {
     return {
-      error: "Each question must include text, options and a correct answer",
+      error:
+        "Each question must include text and correct answer. MCQ requires options. True/False must use true or false.",
     };
   }
 
-  const questions: NormalizedQuizQuestion[] = rawQuestions.map((question) => ({
-    question: question.question.trim(),
-    options: question.options.map((option) => option.trim()),
-    correctAnswer: question.correctAnswer.trim(),
-  }));
+  const questions: NormalizedQuizQuestion[] = rawQuestions.map((rawQuestion) => {
+    const questionType = normalizeQuestionType(rawQuestion.type ?? "mcq") ?? "mcq";
+    if (questionType === "fill_blank") {
+      return {
+        question: rawQuestion.question.trim(),
+        type: questionType,
+        options: [],
+        correctAnswer: rawQuestion.correctAnswer.trim(),
+      };
+    }
 
-  const hasInvalidCorrectAnswer = questions.some(
-    (question) => !question.options.includes(question.correctAnswer)
-  );
-  if (hasInvalidCorrectAnswer) {
-    return { error: "Correct answer must match one of the options" };
+    if (questionType === "true_false") {
+      return {
+        question: rawQuestion.question.trim(),
+        type: questionType,
+        options: [...defaultTrueFalseOptions],
+        correctAnswer: normalizeTrueFalseAnswer(rawQuestion.correctAnswer)!,
+      };
+    }
+
+    return {
+      question: rawQuestion.question.trim(),
+      type: questionType,
+      options: (rawQuestion.options ?? []).map((option) => option.trim()),
+      correctAnswer: rawQuestion.correctAnswer.trim(),
+    };
+  });
+
+  const hasInvalidMcqQuestion = questions.some((question) => {
+    if (question.type !== "mcq") {
+      return false;
+    }
+    if (question.options.length < 2) {
+      return true;
+    }
+    return !question.options.includes(question.correctAnswer);
+  });
+  if (hasInvalidMcqQuestion) {
+    return { error: "MCQ correct answer must match one of the options" };
   }
 
   return {
@@ -286,6 +399,8 @@ const buildInMemoryQuestions = (questions: NormalizedQuizQuestion[]): InMemoryQu
   questions.map((question) => ({
     question_id: inMemoryQuestionId++,
     question_text: question.question,
+    question_type: question.type,
+    correct_answer_text: question.correctAnswer,
     options: question.options.map((option) => ({
       option_id: inMemoryOptionId++,
       option_text: option,
@@ -388,8 +503,12 @@ const insertQuizQuestions = async (
 ): Promise<void> => {
   for (const question of questions) {
     const questionResult = await db.query(
-      "INSERT INTO questions (quiz_id, question_text) VALUES ($1, $2) RETURNING question_id",
-      [quizId, question.question]
+      `
+        INSERT INTO questions (quiz_id, question_text, question_type, correct_answer_text)
+        VALUES ($1, $2, $3, $4)
+        RETURNING question_id
+      `,
+      [quizId, question.question, question.type, question.correctAnswer]
     );
 
     const questionId = questionResult.rows[0]?.question_id;
@@ -692,7 +811,7 @@ type AttemptStatus = "InProgress" | "Submitted";
 
 interface QuizAttemptAnswerInput {
   questionId: number;
-  selectedOptionText: string;
+  answerText: string;
 }
 
 interface InMemoryQuizAttempt {
@@ -707,6 +826,7 @@ interface InMemoryQuizAttempt {
   total_questions: number;
   faculty_score: number | null;
   reviewed_at: string | null;
+  question_order: number[];
   answers: Record<number, string>;
 }
 
@@ -722,6 +842,7 @@ interface DbAttemptRow {
   total_questions: number;
   faculty_score: number | null;
   reviewed_at: Date | string | null;
+  question_order: unknown;
 }
 
 const inMemoryQuizAttempts: InMemoryQuizAttempt[] = [];
@@ -847,6 +968,7 @@ const ensureQuizAttemptTables = async (
 
   await db.query("ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS faculty_score NUMERIC");
   await db.query("ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ");
+  await db.query("ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS question_order JSONB");
 };
 
 const normalizeAttemptAnswersPayload = (body: unknown): {
@@ -858,6 +980,7 @@ const normalizeAttemptAnswersPayload = (body: unknown): {
       ? (body as {
           answers?: unknown;
           questionId?: unknown;
+          answerText?: unknown;
           selectedOptionText?: unknown;
         })
       : {};
@@ -868,6 +991,7 @@ const normalizeAttemptAnswersPayload = (body: unknown): {
       ? [
           {
             questionId: rawBody.questionId,
+            answerText: rawBody.answerText,
             selectedOptionText: rawBody.selectedOptionText,
           },
         ]
@@ -876,29 +1000,40 @@ const normalizeAttemptAnswersPayload = (body: unknown): {
   if (!answerCandidates.length) {
     return {
       error:
-        "answers is required. Use [{ questionId, selectedOptionText }] or questionId + selectedOptionText",
+        "answers is required. Use [{ questionId, answerText }] or questionId + answerText",
     };
   }
 
   const normalizedAnswers: QuizAttemptAnswerInput[] = [];
   for (const candidate of answerCandidates) {
     if (!candidate || typeof candidate !== "object") {
-      return { error: "Each answer must be an object with questionId and selectedOptionText" };
+      return { error: "Each answer must be an object with questionId and answerText" };
     }
 
-    const answer = candidate as { questionId?: unknown; selectedOptionText?: unknown };
+    const answer = candidate as {
+      questionId?: unknown;
+      answerText?: unknown;
+      selectedOptionText?: unknown;
+    };
     const questionId = Number(answer.questionId);
     if (!Number.isInteger(questionId) || questionId <= 0) {
       return { error: "questionId must be a positive integer" };
     }
 
-    if (typeof answer.selectedOptionText !== "string" || !answer.selectedOptionText.trim()) {
-      return { error: "selectedOptionText is required" };
+    const answerTextCandidate =
+      typeof answer.answerText === "string" && answer.answerText.trim()
+        ? answer.answerText
+        : typeof answer.selectedOptionText === "string"
+          ? answer.selectedOptionText
+          : null;
+
+    if (typeof answerTextCandidate !== "string" || !answerTextCandidate.trim()) {
+      return { error: "answerText is required" };
     }
 
     normalizedAnswers.push({
       questionId,
-      selectedOptionText: answer.selectedOptionText.trim(),
+      answerText: answerTextCandidate.trim(),
     });
   }
 
@@ -929,10 +1064,16 @@ const normalizeFacultyScorePayload = (body: unknown): {
   return { payload: { score: Number(numericScore.toFixed(2)) } };
 };
 
-const extractQuestionOptionLookup = (
+interface QuizQuestionMeta {
+  type: QuestionType;
+  options: Set<string>;
+  correctAnswer: string;
+}
+
+const extractQuestionMetaLookup = (
   quiz: Record<string, unknown>
-): Map<number, Set<string>> => {
-  const questionLookup = new Map<number, Set<string>>();
+): Map<number, QuizQuestionMeta> => {
+  const questionLookup = new Map<number, QuizQuestionMeta>();
   const questions = Array.isArray(quiz.questions) ? quiz.questions : [];
 
   for (const questionValue of questions) {
@@ -941,12 +1082,18 @@ const extractQuestionOptionLookup = (
     }
     const question = questionValue as {
       question_id?: unknown;
+      question_type?: unknown;
+      correct_answer_text?: unknown;
       options?: unknown;
     };
     const questionId = Number(question.question_id);
     if (!Number.isInteger(questionId) || questionId <= 0) {
       continue;
     }
+
+    const questionType = normalizeQuestionType(question.question_type) ?? "mcq";
+    const correctAnswer =
+      typeof question.correct_answer_text === "string" ? question.correct_answer_text.trim() : "";
 
     const optionValues = Array.isArray(question.options) ? question.options : [];
     const options = new Set<string>();
@@ -960,10 +1107,24 @@ const extractQuestionOptionLookup = (
       }
     }
 
-    questionLookup.set(questionId, options);
+    questionLookup.set(questionId, {
+      type: questionType,
+      options,
+      correctAnswer,
+    });
   }
 
   return questionLookup;
+};
+
+const normalizeAnswerForQuestionType = (type: QuestionType, answer: string): string => {
+  if (type === "fill_blank") {
+    return normalizeFreeTextForComparison(answer);
+  }
+  if (type === "true_false") {
+    return normalizeTrueFalseAnswer(answer) ?? answer.trim();
+  }
+  return answer.trim();
 };
 
 const sanitizeQuizForStudent = (quiz: Record<string, unknown>): Record<string, unknown> => {
@@ -972,12 +1133,14 @@ const sanitizeQuizForStudent = (quiz: Record<string, unknown>): Record<string, u
     const question = questionValue as {
       question_id?: unknown;
       question_text?: unknown;
+      question_type?: unknown;
       options?: unknown;
     };
     const options = Array.isArray(question.options) ? question.options : [];
     return {
       question_id: Number(question.question_id),
       question_text: String(question.question_text ?? ""),
+      question_type: normalizeQuestionType(question.question_type) ?? "mcq",
       options: options
         .map((optionValue) => {
           const option = optionValue as {
@@ -1010,6 +1173,97 @@ const sanitizeQuizForStudent = (quiz: Record<string, unknown>): Record<string, u
 
 const countQuizQuestions = (quiz: Record<string, unknown>): number =>
   Array.isArray(quiz.questions) ? quiz.questions.length : 0;
+
+const shuffleNumbers = (values: number[]): number[] => {
+  const shuffled = [...values];
+  for (let i = shuffled.length - 1; i > 0; i -= 1) {
+    const randomIndex = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[i]];
+  }
+  return shuffled;
+};
+
+const parseQuestionOrder = (value: unknown): number[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => Number(item))
+      .filter((item) => Number.isInteger(item) && item > 0);
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item) => Number(item))
+          .filter((item) => Number.isInteger(item) && item > 0);
+      }
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+};
+
+const applyQuestionOrderToQuiz = (
+  quiz: Record<string, unknown>,
+  questionOrder: number[]
+): Record<string, unknown> => {
+  const questions = Array.isArray(quiz.questions) ? quiz.questions : [];
+  if (!questionOrder.length || !questions.length) {
+    return quiz;
+  }
+
+  const questionsById = new Map<number, Record<string, unknown>>();
+  for (const questionValue of questions) {
+    if (!questionValue || typeof questionValue !== "object") {
+      continue;
+    }
+    const question = questionValue as { question_id?: unknown };
+    const questionId = Number(question.question_id);
+    if (Number.isInteger(questionId) && questionId > 0) {
+      questionsById.set(questionId, questionValue as Record<string, unknown>);
+    }
+  }
+
+  const orderedQuestions: Record<string, unknown>[] = [];
+  const seen = new Set<number>();
+  for (const questionId of questionOrder) {
+    const question = questionsById.get(questionId);
+    if (question && !seen.has(questionId)) {
+      orderedQuestions.push(question);
+      seen.add(questionId);
+    }
+  }
+
+  for (const questionValue of questions) {
+    const question = questionValue as { question_id?: unknown };
+    const questionId = Number(question.question_id);
+    if (Number.isInteger(questionId) && questionId > 0 && !seen.has(questionId)) {
+      orderedQuestions.push(questionValue as Record<string, unknown>);
+      seen.add(questionId);
+    }
+  }
+
+  return {
+    ...quiz,
+    questions: orderedQuestions,
+  };
+};
+
+const extractQuestionIds = (quiz: Record<string, unknown>): number[] => {
+  const questions = Array.isArray(quiz.questions) ? quiz.questions : [];
+  return questions
+    .map((questionValue) =>
+      Number(
+        (questionValue as {
+          question_id?: unknown;
+        }).question_id
+      )
+    )
+    .filter((questionId) => Number.isInteger(questionId) && questionId > 0);
+};
 
 const loadDbAttemptAnswers = async (
   db: Pool | PoolClient,
@@ -1071,11 +1325,8 @@ const calculateDbScore = async (
 ): Promise<{ score: number; totalQuestions: number }> => {
   const result = await db.query(
     `
-      SELECT q.question_id, o.option_text AS correct_option
+      SELECT q.question_id, q.question_type, q.correct_answer_text
       FROM questions q
-      LEFT JOIN options o
-        ON o.question_id = q.question_id
-       AND o.is_correct = TRUE
       WHERE q.quiz_id = $1
       ORDER BY q.question_id ASC
     `,
@@ -1085,13 +1336,16 @@ const calculateDbScore = async (
   let score = 0;
   for (const row of result.rows) {
     const questionId = Number((row as { question_id?: unknown }).question_id);
-    const correctOption = (row as { correct_option?: unknown }).correct_option;
-    if (
-      Number.isInteger(questionId) &&
-      questionId > 0 &&
-      typeof correctOption === "string" &&
-      answers[questionId] === correctOption
-    ) {
+    const questionType = normalizeQuestionType((row as { question_type?: unknown }).question_type) ?? "mcq";
+    const correctAnswer = String((row as { correct_answer_text?: unknown }).correct_answer_text ?? "");
+    const selectedAnswer = answers[questionId];
+    if (!Number.isInteger(questionId) || questionId <= 0 || typeof selectedAnswer !== "string") {
+      continue;
+    }
+
+    const normalizedExpected = normalizeAnswerForQuestionType(questionType, correctAnswer);
+    const normalizedSelected = normalizeAnswerForQuestionType(questionType, selectedAnswer);
+    if (normalizedExpected && normalizedExpected === normalizedSelected) {
       score += 1;
     }
   }
@@ -1105,6 +1359,7 @@ const buildDbAttemptResponse = (
   answers: Record<number, string>
 ): Record<string, unknown> => {
   const expiresAtIso = toIsoString(attempt.expires_at);
+  const orderedQuiz = applyQuestionOrderToQuiz(quiz, parseQuestionOrder(attempt.question_order));
   return {
     attempt_id: attempt.attempt_id,
     quiz_id: attempt.quiz_id,
@@ -1119,7 +1374,7 @@ const buildDbAttemptResponse = (
     total_questions: Number(attempt.total_questions ?? countQuizQuestions(quiz)),
     remaining_seconds: attempt.submitted_at ? 0 : remainingSecondsFromIso(expiresAtIso),
     answers,
-    quiz: sanitizeQuizForStudent(quiz),
+    quiz: sanitizeQuizForStudent(orderedQuiz),
   };
 };
 
@@ -1161,13 +1416,21 @@ const validateAttemptAnswersAgainstQuiz = (
   quiz: Record<string, unknown>,
   answers: QuizAttemptAnswerInput[]
 ): string | null => {
-  const questionLookup = extractQuestionOptionLookup(quiz);
+  const questionLookup = extractQuestionMetaLookup(quiz);
   for (const answer of answers) {
-    const optionSet = questionLookup.get(answer.questionId);
-    if (!optionSet) {
+    const questionMeta = questionLookup.get(answer.questionId);
+    if (!questionMeta) {
       return `Question ${answer.questionId} does not belong to this quiz`;
     }
-    if (!optionSet.has(answer.selectedOptionText)) {
+
+    if (questionMeta.type === "fill_blank") {
+      if (!answer.answerText.trim()) {
+        return `Answer is required for question ${answer.questionId}`;
+      }
+      continue;
+    }
+
+    if (!questionMeta.options.has(answer.answerText)) {
       return `Invalid option selected for question ${answer.questionId}`;
     }
   }
@@ -1192,29 +1455,19 @@ const calculateInMemoryScore = (
   let score = 0;
   for (const question of quiz.questions) {
     const selected = answers[question.question_id];
-    const correct = question.options.find((option) => option.is_correct)?.option_text;
-    if (selected && correct && selected === correct) {
+    const correct = question.correct_answer_text;
+    if (!selected) {
+      continue;
+    }
+
+    const normalizedExpected = normalizeAnswerForQuestionType(question.question_type, correct);
+    const normalizedSelected = normalizeAnswerForQuestionType(question.question_type, selected);
+    if (normalizedExpected && normalizedExpected === normalizedSelected) {
       score += 1;
     }
   }
   return { score, totalQuestions: quiz.questions.length };
 };
-
-const sanitizeInMemoryQuizForStudent = (quiz: InMemoryQuiz): Record<string, unknown> => ({
-  quiz_id: quiz.quiz_id,
-  cls: quiz.cls,
-  title: quiz.title,
-  duration: quiz.duration,
-  status: quiz.status,
-  questions: quiz.questions.map((question) => ({
-    question_id: question.question_id,
-    question_text: question.question_text,
-    options: question.options.map((option) => ({
-      option_id: option.option_id,
-      option_text: option.option_text,
-    })),
-  })),
-});
 
 const finalizeInMemoryAttempt = (
   quiz: InMemoryQuiz,
@@ -1237,6 +1490,14 @@ const buildInMemoryAttemptResponse = (
   attempt: InMemoryQuizAttempt
 ): Record<string, unknown> => {
   const remaining = attempt.submitted_at ? 0 : remainingSecondsFromIso(attempt.expires_at);
+  const questionOrder = Array.isArray(attempt.question_order) ? attempt.question_order : [];
+  const orderedQuestions = applyQuestionOrderToQuiz(
+    {
+      ...quiz,
+      questions: quiz.questions,
+    } as Record<string, unknown>,
+    questionOrder
+  );
   return {
     attempt_id: attempt.attempt_id,
     quiz_id: attempt.quiz_id,
@@ -1251,7 +1512,7 @@ const buildInMemoryAttemptResponse = (
     total_questions: attempt.total_questions,
     remaining_seconds: remaining,
     answers: attempt.answers,
-    quiz: sanitizeInMemoryQuizForStudent(quiz),
+    quiz: sanitizeQuizForStudent(orderedQuestions),
   };
 };
 
@@ -1275,16 +1536,41 @@ export const startQuizAttempt = async (req: Request, res: Response) => {
 
     const latestAttempt = await loadLatestDbAttempt(pool, quizId, studentId);
     if (latestAttempt) {
-      if (!latestAttempt.submitted_at && remainingSecondsFromIso(toIsoString(latestAttempt.expires_at)) <= 0) {
-        const finalizedAttempt = await finalizeDbAttempt(pool, quizIdColumn, quizId, latestAttempt);
+      let attemptForResponse = latestAttempt;
+      const storedOrder = parseQuestionOrder(latestAttempt.question_order);
+      if (!storedOrder.length) {
+        const shuffledOrder = shuffleNumbers(extractQuestionIds(quiz));
+        const updateAttemptResult = await pool.query(
+          `
+            UPDATE quiz_attempts
+            SET question_order = $1
+            WHERE attempt_id = $2
+            RETURNING *
+          `,
+          [JSON.stringify(shuffledOrder), latestAttempt.attempt_id]
+        );
+        attemptForResponse =
+          (updateAttemptResult.rows[0] as DbAttemptRow | undefined) ?? latestAttempt;
+      }
+
+      if (
+        !attemptForResponse.submitted_at &&
+        remainingSecondsFromIso(toIsoString(attemptForResponse.expires_at)) <= 0
+      ) {
+        const finalizedAttempt = await finalizeDbAttempt(
+          pool,
+          quizIdColumn,
+          quizId,
+          attemptForResponse
+        );
         if (!finalizedAttempt) {
           return res.status(404).json({ error: "Quiz not found" });
         }
         return res.json(finalizedAttempt);
       }
 
-      const existingAnswers = await loadDbAttemptAnswers(pool, latestAttempt.attempt_id);
-      return res.json(buildDbAttemptResponse(quiz, latestAttempt, existingAnswers));
+      const existingAnswers = await loadDbAttemptAnswers(pool, attemptForResponse.attempt_id);
+      return res.json(buildDbAttemptResponse(quiz, attemptForResponse, existingAnswers));
     }
 
     const quizStatus = String((quiz as { status?: unknown }).status ?? "").toLowerCase();
@@ -1295,13 +1581,14 @@ export const startQuizAttempt = async (req: Request, res: Response) => {
     const durationSeconds = parseDurationToSeconds(String((quiz as { duration?: unknown }).duration ?? ""));
     const expiresAt = new Date(Date.now() + durationSeconds * 1000);
     const totalQuestions = countQuizQuestions(quiz);
+    const questionOrder = shuffleNumbers(extractQuestionIds(quiz));
     const createResult = await pool.query(
       `
-        INSERT INTO quiz_attempts (quiz_id, student_id, expires_at, status, total_questions)
-        VALUES ($1, $2, $3, 'InProgress', $4)
+        INSERT INTO quiz_attempts (quiz_id, student_id, expires_at, status, total_questions, question_order)
+        VALUES ($1, $2, $3, 'InProgress', $4, $5)
         RETURNING *
       `,
-      [quizId, studentId, expiresAt.toISOString(), totalQuestions]
+      [quizId, studentId, expiresAt.toISOString(), totalQuestions, JSON.stringify(questionOrder)]
     );
 
     const attempt = createResult.rows[0] as DbAttemptRow;
@@ -1315,6 +1602,11 @@ export const startQuizAttempt = async (req: Request, res: Response) => {
 
       const latestAttempt = findLatestInMemoryAttempt(quizId, studentId);
       if (latestAttempt) {
+        if (!Array.isArray(latestAttempt.question_order) || !latestAttempt.question_order.length) {
+          latestAttempt.question_order = shuffleNumbers(
+            quiz.questions.map((question) => question.question_id)
+          );
+        }
         if (!latestAttempt.submitted_at && remainingSecondsFromIso(latestAttempt.expires_at) <= 0) {
           finalizeInMemoryAttempt(quiz, latestAttempt);
         }
@@ -1327,6 +1619,7 @@ export const startQuizAttempt = async (req: Request, res: Response) => {
 
       const durationSeconds = parseDurationToSeconds(quiz.duration);
       const now = new Date();
+      const questionOrder = shuffleNumbers(quiz.questions.map((question) => question.question_id));
       const attempt: InMemoryQuizAttempt = {
         attempt_id: inMemoryAttemptId++,
         quiz_id: quiz.quiz_id,
@@ -1339,6 +1632,7 @@ export const startQuizAttempt = async (req: Request, res: Response) => {
         total_questions: quiz.questions.length,
         faculty_score: null,
         reviewed_at: null,
+        question_order: questionOrder,
         answers: {},
       };
       inMemoryQuizAttempts.push(attempt);
@@ -1491,7 +1785,7 @@ export const saveQuizAttemptAnswers = async (req: Request, res: Response) => {
             selected_option_text = EXCLUDED.selected_option_text,
             updated_at = NOW()
         `,
-        [attemptId, answer.questionId, answer.selectedOptionText]
+        [attemptId, answer.questionId, answer.answerText]
       );
     }
 
@@ -1537,7 +1831,10 @@ export const saveQuizAttemptAnswers = async (req: Request, res: Response) => {
       }
 
       const validationError = validateAttemptAnswersAgainstQuiz(
-        sanitizeInMemoryQuizForStudent(quiz),
+        sanitizeQuizForStudent({
+          ...quiz,
+          questions: quiz.questions,
+        } as Record<string, unknown>),
         answersToSave
       );
       if (validationError) {
@@ -1545,7 +1842,7 @@ export const saveQuizAttemptAnswers = async (req: Request, res: Response) => {
       }
 
       for (const answer of answersToSave) {
-        attempt.answers[answer.questionId] = answer.selectedOptionText;
+        attempt.answers[answer.questionId] = answer.answerText;
       }
 
       return res.json({
